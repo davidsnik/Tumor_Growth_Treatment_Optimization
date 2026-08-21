@@ -1,0 +1,7 @@
+ngsolve
+webgui_jupyter_widgets
+numpy
+scipy
+matplotlib
+pandas
+jupyterlab

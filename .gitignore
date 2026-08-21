@@ -1,0 +1,28 @@
+# Generated simulation, optimization, and paper artifacts
+/outputs/*
+!/outputs/raw/
+!/outputs/paper/
+/outputs/raw/*
+!/outputs/raw/.gitkeep
+/outputs/paper/*
+!/outputs/paper/figures/
+!/outputs/paper/tables/
+/outputs/paper/figures/*
+!/outputs/paper/figures/.gitkeep
+/outputs/paper/tables/*
+!/outputs/paper/tables/.gitkeep
+
+# Generated build files
+/build/
+
+# Python and Jupyter working files
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
