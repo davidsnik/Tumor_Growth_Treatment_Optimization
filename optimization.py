@@ -10,6 +10,7 @@ from model import TreatmentSchedule
 from solver import build_spherical_mesh, solve_model
 
 _PENALTY = 1.0e6
+_PENALTY_PROGRESSION = 1.0e5
 
 def _make_schedule(increments: np.ndarray, config: Config) -> TreatmentSchedule:
     return TreatmentSchedule(
@@ -30,9 +31,14 @@ def _objective(increments: np.ndarray, config: Config, shared_mesh) -> float:
     try:
         result = solve_model(config, schedule, mesh=mesh)
     except RuntimeError:
-        return _PENALTY
+        return _PENALTY + float(np.sum(increments))
  
-    return result.outcomes.objective
+    outcome = result.outcomes
+    
+    if outcome.progression_prevented:
+        return outcome.objective
+    
+    return outcome.objective + _PENALTY_PROGRESSION
 
 
 def optimize_treatment(config: Config) -> np.ndarray:
