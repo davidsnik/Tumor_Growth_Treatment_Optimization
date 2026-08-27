@@ -4,19 +4,7 @@ from pathlib import Path
 import pyvista as pv
 import time
 
-def get_max(reader, times: list[float]) -> float:
-    peak = 0.0
-    for t in times:
-        reader.set_active_time_value(t)
-        grid = reader.read()
-        if isinstance(grid, pv.MultiBlock):
-            grid = grid.combine()
-        for pop in ("sensitive", "resistant"):
-            if pop in grid.array_names:
-                peak = max(peak, float(grid[pop].max()))
-    return peak
-
-def plot_tumor_interactive(tumor_data_path: Path) -> None:
+def plot_tumor_interactive(tumor_data_path: Path, load_in_memory: bool = True) -> None:
     if not tumor_data_path.exists():
         raise FileNotFoundError(f"{tumor_data_path} does not exits")
     if tumor_data_path.suffix not in (".vtu", ".pvd"):
@@ -25,18 +13,22 @@ def plot_tumor_interactive(tumor_data_path: Path) -> None:
     reader = pv.get_reader(str(tumor_data_path))
     times = reader.time_values
 
-    max_tumor_concentration = get_max(reader, times)
-    if max_tumor_concentration == 0.0:
-        raise ValueError(f"The max tumor concentration in the data is 0.0, check the data or simulations.")
-
-    ### Load the data beforehand
+    ### Load the data beforehand if needed
     frames = []
+    max_tumor_concentration = 0.0
     for t in times:
         reader.set_active_time_value(t)
         grid = reader.read()
         if isinstance(grid, pv.MultiBlock):
             grid = grid.combine()
-        frames.append(grid)
+        for pop in ("sensitive", "resistant"):
+            if pop in grid.array_names:
+                max_tumor_concentration = max(max_tumor_concentration, float(grid[pop].max()))
+        if load_in_memory:
+            frames.append(grid)
+
+    if max_tumor_concentration == 0.0:
+        raise ValueError(f"The max tumor concentration in the data is 0.0, check the data or simulations.")
 
     state = {"time_index": 0, "pop": "sensitive", "threshold": 0.0, "playing": False}
     plotter = pv.Plotter()
@@ -45,7 +37,14 @@ def plot_tumor_interactive(tumor_data_path: Path) -> None:
     def render_new():
         nonlocal actor
 
-        grid = frames[state["time_index"]]
+        if load_in_memory:
+            grid = frames[state["time_index"]]
+        else:
+            reader.set_active_time_value(times[state["time_index"]])
+            grid = reader.read()
+            if isinstance(grid, pv.MultiBlock):
+                grid = grid.combine()
+
         pop = state["pop"]
         thresh = state["threshold"]
         shown = grid.threshold(thresh, scalars=pop) if thresh > 0.0 else grid
@@ -137,4 +136,4 @@ def plot_tumor_interactive(tumor_data_path: Path) -> None:
 
 
 if __name__=="__main__":
-    plot_tumor_interactive(Path("outputs/raw/tumor_data.pvd"))
+    plot_tumor_interactive(Path("outputs/raw/tumor_data.pvd"), False)
