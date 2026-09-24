@@ -11,6 +11,7 @@ has been created, is::
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Callable
 
 import numpy as np
@@ -84,13 +85,22 @@ class _MechanicalProblem:
 
 
 def build_spherical_mesh(config: Config) -> Mesh:
-    """Generate the tetrahedral spherical domain used by both model parts."""
+    """Generate the tetrahedral spherical domain used by both model parts.
 
+    Meshes are cached per process, so repeated calls with the same radius and
+    element size reuse one mesh. Callers must not modify the returned mesh.
+    """
+
+    return _spherical_mesh(config.domain_radius, config.mesh_max_size)
+
+
+@lru_cache(maxsize=4)
+def _spherical_mesh(domain_radius: float, mesh_max_size: float) -> Mesh:
     geometry = CSGeometry()
     geometry.Add(
-        Sphere(Pnt(0.0, 0.0, 0.0), config.domain_radius).bc("outer")
+        Sphere(Pnt(0.0, 0.0, 0.0), domain_radius).bc("outer")
     )
-    return Mesh(geometry.GenerateMesh(maxh=config.mesh_max_size))
+    return Mesh(geometry.GenerateMesh(maxh=mesh_max_size))
 
 
 def _copy_field(field: GridFunction) -> GridFunction:
