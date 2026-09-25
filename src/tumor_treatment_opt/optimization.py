@@ -9,9 +9,9 @@ import time
 from scipy.optimize import differential_evolution, minimize, Bounds, LinearConstraint, OptimizeResult
 from functools import partial
 
-from src.tumor_treatment_opt.config import Config
-from src.tumor_treatment_opt.model import TreatmentSchedule, OutcomeMetrics
-from src.tumor_treatment_opt.solver import build_spherical_mesh, solve_model
+from .config import Config
+from .model import TreatmentSchedule, OutcomeMetrics
+from .solver import build_spherical_mesh, solve_model
 
 
 _PENALTY = 1.0e6

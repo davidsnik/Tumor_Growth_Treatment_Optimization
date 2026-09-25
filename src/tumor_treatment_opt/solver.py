@@ -41,8 +41,8 @@ from ngsolve import (
     z,
 )
 
-from src.tumor_treatment_opt.config import Config
-from src.tumor_treatment_opt.model import (
+from .config import Config
+from .model import (
     BurdenTimeSeries,
     OutcomeMetrics,
     TreatmentSchedule,

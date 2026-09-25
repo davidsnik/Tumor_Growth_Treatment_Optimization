@@ -9,7 +9,7 @@ from typing import Any, Callable
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from src.tumor_treatment_opt.config import Config
+from .config import Config
 
 
 FloatArray = NDArray[np.float64]
