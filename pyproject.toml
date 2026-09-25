@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tumor-treatment-opt"
+version = "0.1.0"
+description = "Finite-element tumor growth model with drug-schedule optimization"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ngsolve",          # includes the netgen mesher
+    "numpy>=2.0",       # np.trapezoid
+    "scipy>=1.14",      # method="COBYQA"
+    "pyvista",          # plotting.py
+]
+
+[project.optional-dependencies]
+notebook = [
+    "jupyterlab",
+    "webgui_jupyter_widgets",
+    "matplotlib",
+    "pandas",
+]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

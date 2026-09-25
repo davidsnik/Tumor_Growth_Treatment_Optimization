@@ -23,6 +23,8 @@ class Config:
     time_step: float  # Step size used to advance the coupled model.
     population_element_order: int  # Element order for Ns and Nr.
     displacement_element_order: int  # Element order for tissue displacement.
+    lumping: bool # Decides whether the solver lumps the mass matrix
+    time_stepping: str  # "picard" (iterate crowding to convergence) or "semi_implicit" (one linear solve per step).
 
     # Tumor growth and spreading
     growth_rate_sensitive: float  # Proliferation rate r_s of sensitive cells.
@@ -116,8 +118,12 @@ class Config:
             raise ValueError("final_time must be positive")
         if not 0.0 < self.time_step <= self.final_time:
             raise ValueError("time_step must lie in (0, final_time]")
+        if self.time_stepping not in ("picard", "semi_implicit"):
+            raise ValueError("time_stepping must be 'picard' or 'semi_implicit'")
         if self.population_element_order < 1 or self.displacement_element_order < 1:
             raise ValueError("finite-element orders must be at least one")
+        if self.population_element_order != 1 and self.lumping:
+            raise ValueError("lumping is only valid for population_element_order 1")
 
         if self.growth_rate_sensitive <= 0.0:
             raise ValueError("growth_rate_sensitive must be positive")

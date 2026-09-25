@@ -18,12 +18,14 @@ import numpy as np
 from netgen.csg import CSGeometry, Pnt, Sphere
 from ngsolve import (
     BilinearForm,
+    ET,
     GridFunction,
     H1,
     Id,
     IfPos,
     InnerProduct,
     Integrate,
+    IntegrationRule,
     L2,
     LinearForm,
     Mesh,
@@ -39,8 +41,8 @@ from ngsolve import (
     z,
 )
 
-from config import Config
-from model import (
+from src.tumor_treatment_opt.config import Config
+from src.tumor_treatment_opt.model import (
     BurdenTimeSeries,
     OutcomeMetrics,
     TreatmentSchedule,
@@ -50,6 +52,17 @@ from model import (
 
 
 InitialCondition = Callable[..., tuple[Any, Any]]
+
+_LUMPED_DX = dx(
+    intrules={
+        ET.TET: IntegrationRule(
+            [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)],
+            [1.0 / 24.0] * 4,
+        )
+    }
+)
+
+_NEGATIVE_MASS_TOLERANCE = 1.0e-6
 
 
 @dataclass
@@ -213,21 +226,33 @@ def _advance_populations(
     nonlinear_tolerance: float,
     nonlinear_max_iterations: int,
 ) -> tuple[GridFunction, GridFunction]:
-    """Take one backward-Euler step using a fixed-point reaction solve."""
+    """Take one backward-Euler step using a fixed-point reaction solve or semi implicit Euler, with optional mass matrix lumping."""
 
     space = sensitive_old.space
     trial, test = space.TnT()
     sensitive_iterate = _copy_field(sensitive_old)
     resistant_iterate = _copy_field(resistant_old)
 
+    mass_dx = _LUMPED_DX if config.lumping else dx
+
     sensitive_rhs = LinearForm(space)
-    sensitive_rhs += sensitive_old * test / step_size * dx
+    sensitive_rhs += sensitive_old * test / step_size * mass_dx
     sensitive_rhs.Assemble()
     resistant_rhs = LinearForm(space)
-    resistant_rhs += resistant_old * test / step_size * dx
+    resistant_rhs += resistant_old * test / step_size * mass_dx
     resistant_rhs.Assemble()
 
-    for _ in range(nonlinear_max_iterations):
+    semi_implicit = config.time_stepping == "semi_implicit"
+    iterations = 1 if semi_implicit else nonlinear_max_iterations
+
+    sensitive_stiffness = BilinearForm(space)
+    sensitive_stiffness += diffusion_sensitive * InnerProduct(grad(trial), grad(test)) * dx
+    sensitive_stiffness.Assemble()
+    resistant_stiffness = BilinearForm(space)
+    resistant_stiffness += diffusion_resistant * InnerProduct(grad(trial), grad(test)) * dx
+    resistant_stiffness.Assemble()
+
+    for _ in range(iterations):
         crowding = 1.0 - (
             sensitive_iterate + resistant_iterate
         ) / config.carrying_capacity
@@ -242,18 +267,14 @@ def _advance_populations(
         )
 
         sensitive_form = BilinearForm(space)
-        sensitive_form += (
-            (1.0 / step_size - sensitive_rate) * trial * test
-            + diffusion_sensitive * InnerProduct(grad(trial), grad(test))
-        ) * dx
+        sensitive_form += (1.0 / step_size - sensitive_rate) * trial * test * mass_dx
         sensitive_form.Assemble()
+        sensitive_form.mat.AsVector().data += sensitive_stiffness.mat.AsVector()
 
         resistant_form = BilinearForm(space)
-        resistant_form += (
-            (1.0 / step_size - resistant_rate) * trial * test
-            + diffusion_resistant * InnerProduct(grad(trial), grad(test))
-        ) * dx
+        resistant_form += (1.0 / step_size - resistant_rate) * trial * test * mass_dx
         resistant_form.Assemble()
+        resistant_form.mat.AsVector().data += resistant_stiffness.mat.AsVector()
 
         sensitive_new = GridFunction(space)
         sensitive_new.vec.data = sensitive_form.mat.Inverse(
@@ -282,7 +303,7 @@ def _advance_populations(
         sensitive_iterate = sensitive_new
         resistant_iterate = resistant_new
 
-        if relative_change <= nonlinear_tolerance:
+        if semi_implicit or relative_change <= nonlinear_tolerance:
             return sensitive_new, resistant_new
 
     raise RuntimeError(
@@ -294,9 +315,10 @@ def _advance_populations(
 def _check_nonnegative(field: GridFunction, mesh: Mesh, name: str, time: float) -> None:
     negative_mass = float(Integrate(IfPos(-field, -field, 0.0), mesh))
     total_mass = abs(float(Integrate(field, mesh)))
-    if negative_mass > 1.0e-10 * max(total_mass, 1.0):
+    if negative_mass > _NEGATIVE_MASS_TOLERANCE * max(total_mass, 1.0):
         raise RuntimeError(
-            f"{name} density became negative at t={time:.6g}; reduce time_step"
+            f"{name} density became negative at t={time:.6g}; enable lumping or reduce "
+             "mesh_max_size relative to initial_tumor_width"
         )
 
 
