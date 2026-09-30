@@ -2,6 +2,7 @@
 /outputs/*
 !/outputs/raw/
 !/outputs/paper/
+!/outputs/validation/
 /outputs/raw/*
 !/outputs/raw/.gitkeep
 /outputs/paper/*
@@ -26,3 +27,5 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+*.egg-info/

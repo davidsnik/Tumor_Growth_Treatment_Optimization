@@ -19,6 +19,8 @@ class Config:
     # Geometry and time discretization
     domain_radius: float  # Radius R of the spherical tissue domain.
     mesh_max_size: float  # Largest tetrahedron size used by Netgen.
+    mesh_refinement_radius: float  # Radius of the refined ball around the tumor centre; 0 disables it.
+    mesh_fine_size: float  # Largest tetrahedron size inside the refinement ball.
     final_time: float  # End time T of the simulated treatment period.
     time_step: float  # Step size used to advance the coupled model.
     population_element_order: int  # Element order for Ns and Nr.
@@ -77,6 +79,8 @@ class Config:
         finite_values = {
             "domain_radius": self.domain_radius,
             "mesh_max_size": self.mesh_max_size,
+            "refinement_size": self.mesh_refinement_radius,
+            "mesh_fine_size": self.mesh_fine_size,
             "final_time": self.final_time,
             "time_step": self.time_step,
             "growth_rate_sensitive": self.growth_rate_sensitive,
@@ -114,6 +118,10 @@ class Config:
             raise ValueError("domain_radius must be positive")
         if self.mesh_max_size <= 0.0:
             raise ValueError("mesh_max_size must be positive")
+        if not 0.0 <= self.mesh_refinement_radius < self.domain_radius:
+            raise ValueError("mesh_refinement_radius must lie in [0, domain_radius)")
+        if self.mesh_refinement_radius > 0.0 and not 0.0 < self.mesh_fine_size <= self.mesh_max_size:
+            raise ValueError("mesh_fine_size must lie in (0, mesh_max_size]")
         if self.final_time <= 0.0:
             raise ValueError("final_time must be positive")
         if not 0.0 < self.time_step <= self.final_time:

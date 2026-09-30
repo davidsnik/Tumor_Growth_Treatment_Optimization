@@ -307,7 +307,8 @@ def _run_hybrid(
 
     if cheap_config is None:
         cheap_config = (
-            replace(config, mesh_max_size=2.0 * config.mesh_max_size)
+            replace(config, mesh_max_size=2.0 * config.mesh_max_size,
+                    mesh_fine_size=2.0 * config.mesh_fine_size)
             if config.lumping
             else replace(config, mechanics_enabled=False)
         )

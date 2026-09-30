@@ -101,18 +101,33 @@ def build_spherical_mesh(config: Config) -> Mesh:
     """Generate the tetrahedral spherical domain used by both model parts.
 
     Meshes are cached per process, so repeated calls with the same radius and
-    element size reuse one mesh. Callers must not modify the returned mesh.
+    element size reuse one mesh. Optionally the mesh can be refined around the center
+    to make sure the initial conditions are well-behaved. Callers must not modify the returned mesh.
     """
 
-    return _spherical_mesh(config.domain_radius, config.mesh_max_size)
+    return _spherical_mesh(
+        config.domain_radius,
+        config.mesh_max_size,
+        config.mesh_refinement_radius,
+        config.mesh_fine_size,
+    )
 
 
 @lru_cache(maxsize=4)
-def _spherical_mesh(domain_radius: float, mesh_max_size: float) -> Mesh:
+def _spherical_mesh(
+    domain_radius: float,
+    mesh_max_size: float,
+    refinement_radius: float,
+    fine_size: float,
+) -> Mesh:
     geometry = CSGeometry()
-    geometry.Add(
-        Sphere(Pnt(0.0, 0.0, 0.0), domain_radius).bc("outer")
-    )
+    outer = Sphere(Pnt(0.0, 0.0, 0.0), domain_radius).bc("outer")
+    if refinement_radius > 0.0:
+        inner = Sphere(Pnt(0.0, 0.0, 0.0), refinement_radius)
+        geometry.Add(inner, maxh=fine_size)
+        geometry.Add(outer - inner, maxh=mesh_max_size)
+    else:
+        geometry.Add(outer)
     return Mesh(geometry.GenerateMesh(maxh=mesh_max_size))
 
 
