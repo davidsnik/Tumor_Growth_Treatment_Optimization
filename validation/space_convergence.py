@@ -16,7 +16,7 @@ from tumor_treatment_opt.solver import build_spherical_mesh, solve_model
 
 PRESET = "paper"
 OVERRIDES: dict = {"time_step":0.25}
-MESH_SIZES = ((0.1, 0.2), (0.05, 0.1), (0.025, 0.05))
+MESH_SIZES = ((0.2, 0.4), (0.1, 0.2), (0.05, 0.1), (0.025, 0.05), (0.0125, 0.25))
 QUANTITIES = ("objective", "final_total_relative")
 OUTPUT = Path("outputs") / "validation" / "space_convergence.csv"
 
@@ -54,13 +54,14 @@ def main() -> None:
         rows.append({
             "fine_size": fine_size,
             "coarse_size": coarse_size,
+            "effective_mesh_size": effective_mesh_size(mesh),
             "elements": mesh.ne,
             **{key: getattr(outcomes, key) for key in QUANTITIES},
         })
         print(f"done: mesh_max_size={coarse_size}", flush=True)
 
 
-    h = np.array([row["h"] for row in rows])
+    h = np.array([row["fine_size"] for row in rows])
     for quantity in QUANTITIES:
         values = np.array([row[quantity] for row in rows])
         differences = np.abs(values[:-1] - values[1:])

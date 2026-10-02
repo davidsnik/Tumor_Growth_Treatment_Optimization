@@ -15,7 +15,7 @@ from tumor_treatment_opt.solver import build_spherical_mesh, solve_model
 
 PRESET = "paper"
 OVERRIDES: dict = {}
-TIME_STEPS = (0.5, 0.25, 0.125, 0.0625, 0.03125)
+TIME_STEPS = (0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625)
 QUANTITIES = ("objective", "final_total_relative")
 OUTPUT = Path("outputs") / "validation" / "time_convergence.csv"   # line 21
 
@@ -48,7 +48,7 @@ def main() -> None:
         })
         print(f"done: time_step={time_step}", flush=True)
 
-    dt = np.array([row["t"] for row in rows])
+    dt = np.array([row["dt"] for row in rows])
     for quantity in QUANTITIES:
         values = np.array([row[quantity] for row in rows])
         differences = np.abs(values[:-1] - values[1:])
