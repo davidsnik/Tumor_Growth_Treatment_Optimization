@@ -23,8 +23,8 @@ RADIAL_MESH_SIZE = 0.00125
 MESH_SIZES_3D = {
     ("paper", False): (0.1, 0.07, 0.05),
     ("paper", True): (0.2, 0.14, 0.1, 0.07, 0.05),
-    ("strong_mechanics", False): (0.1, 0.07, 0.05),
-    ("strong_mechanics", True): (0.2, 0.14, 0.1, 0.07, 0.05),
+    ("strong_mechanics", False): (0.1, 0.07),
+    ("strong_mechanics", True): (0.2, 0.14, 0.1, 0.07),
 }
 
 DIRECTIONS = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
