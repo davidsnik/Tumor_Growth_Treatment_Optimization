@@ -75,6 +75,7 @@ _PRESETS: dict[str, dict[str, Any]] = {
     ),
     # Comparison without mechanical feedback on cell spreading.
     "no_mechanics": dict(mechanics_enabled=False),
+    "strong_mechanics": dict(stress_sensitivity=300.0, domain_radius=2.0),
 }
 
 
