@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 import numpy as np
 from netgen.csg import CSGeometry, Pnt, Sphere
+from ngsolve.krylovspace import CGSolver
 from ngsolve import (
     BilinearForm,
     ET,
@@ -30,6 +31,7 @@ from ngsolve import (
     LinearForm,
     Mesh,
     Sym,
+    TaskManager,
     Trace,
     VectorH1,
     dx,
@@ -230,6 +232,17 @@ def _solve_mechanics(
     return problem.displacement, von_mises
 
 
+def _solve_spd(matrix, rhs, space, tolerance=1.0e-10, max_iterations=500):
+    """Jacobi-preconditioned CG; the population matrices are mass dominated."""
+    solver = CGSolver(matrix, matrix.CreateSmoother(space.FreeDofs()),
+                      tol=tolerance, maxiter=max_iterations)
+    solution = GridFunction(space)
+    solution.vec.data = solver * rhs.vec
+    if solver.iterations >= max_iterations:
+        raise RuntimeError("population CG did not converge")
+    return solution
+
+
 def _advance_populations(
     sensitive_old: GridFunction,
     resistant_old: GridFunction,
@@ -291,14 +304,8 @@ def _advance_populations(
         resistant_form.Assemble()
         resistant_form.mat.AsVector().data += resistant_stiffness.mat.AsVector()
 
-        sensitive_new = GridFunction(space)
-        sensitive_new.vec.data = sensitive_form.mat.Inverse(
-            space.FreeDofs(), inverse="sparsecholesky"
-        ) * sensitive_rhs.vec
-        resistant_new = GridFunction(space)
-        resistant_new.vec.data = resistant_form.mat.Inverse(
-            space.FreeDofs(), inverse="sparsecholesky"
-        ) * resistant_rhs.vec
+        sensitive_new = _solve_spd(sensitive_form.mat, sensitive_rhs, space)
+        resistant_new = _solve_spd(resistant_form.mat, resistant_rhs, space)
 
         old_values = np.concatenate(
             (
@@ -337,7 +344,7 @@ def _check_nonnegative(field: GridFunction, mesh: Mesh, name: str, time: float) 
         )
 
 
-def solve_model(
+def _solve_model(
     config: Config,
     schedule: TreatmentSchedule,
     *,
@@ -462,3 +469,33 @@ def solve_model(
         von_mises_stress=von_mises_stress,
         snapshots=snapshots,
     )
+
+
+def solve_model(
+    config: Config,
+    schedule: TreatmentSchedule,
+    mesh: Mesh | None = None,
+    initial_condition: InitialCondition = gaussian_initial_conditions,
+    save_snapshots: bool = False,
+    nonlinear_tolerance: float = 1.0e-8,
+    nonlinear_max_iterations: int = 25,
+) -> SimulationResult:
+    """Solve the full model on ``[0, T]`` and calculate paper outcomes.
+
+    On each interval, mechanics is solved from the current tumor, treatment is
+    evaluated at the interval midpoint, and the two population equations are
+    advanced by backward Euler. Fixed-point iteration handles their shared
+    crowding term. The H1 formulation imposes the no-flux conditions naturally.
+
+    A mesh may be supplied to reuse it across schedule evaluations. Population
+    fields are always returned at the final time; intermediate fields are kept
+    only when ``save_snapshots`` is true.
+    """
+    with TaskManager():
+        return _solve_model(config=config, 
+                            schedule=schedule, 
+                            mesh=mesh, 
+                            initial_condition=initial_condition, 
+                            save_snapshots=save_snapshots, 
+                            nonlinear_tolerance=nonlinear_tolerance, 
+                            nonlinear_max_iterations=nonlinear_max_iterations)

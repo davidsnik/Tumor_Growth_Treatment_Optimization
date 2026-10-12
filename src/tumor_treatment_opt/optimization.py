@@ -8,6 +8,8 @@ import numpy as np
 import time
 from scipy.optimize import differential_evolution, minimize, Bounds, LinearConstraint, OptimizeResult
 from functools import partial
+import os
+from ngsolve import SetNumThreads
 
 from .config import Config
 from .model import TreatmentSchedule, OutcomeMetrics
@@ -184,25 +186,34 @@ def _de_search(config: Config) -> OptimizeResult:
     build_spherical_mesh(config)
     problem = build_problem(config)
 
+    cores = os.cpu_count() or 1
+    if parallel:
+        workers = cores if config.optimization_workers == -1 else config.optimization_workers
+        SetNumThreads(max(1, cores // workers))
+
     history: list[float] = []
 
     def record(intermediate_result: OptimizeResult) -> None:
         history.append(float(intermediate_result.fun))
 
     start = time.perf_counter()
-    result = differential_evolution(
-        problem.objective,
-        bounds=problem.bounds,
-        constraints=problem.constraints,
-        seed=config.optimization_seed,
-        maxiter=config.optimization_max_iterations,
-        popsize=config.optimization_population_size,
-        tol=config.optimization_tolerance,
-        polish=config.optimization_polish,
-        workers=config.optimization_workers,
-        updating="deferred" if parallel else "immediate",
-        callback=record,
-    )
+    try:
+        result = differential_evolution(
+            problem.objective,
+            bounds=problem.bounds,
+            constraints=problem.constraints,
+            seed=config.optimization_seed,
+            maxiter=config.optimization_max_iterations,
+            popsize=config.optimization_population_size,
+            tol=config.optimization_tolerance,
+            polish=config.optimization_polish,
+            workers=config.optimization_workers,
+            updating="deferred" if parallel else "immediate",
+            callback=record,
+        )
+    finally:
+        if parallel:
+            SetNumThreads(cores) 
     result.wall_time = time.perf_counter() - start
     result.history = tuple(history)
     return result
