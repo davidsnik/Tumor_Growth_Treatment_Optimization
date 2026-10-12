@@ -17,7 +17,7 @@ PRESET = "paper"
 OVERRIDES: dict = {}
 TIME_STEPS = (0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625)
 QUANTITIES = ("objective", "final_total_relative")
-OUTPUT = Path("outputs") / "validation" / "time_convergence.csv"   # line 21
+OUTPUT = Path("outputs") / "validation" / "validation_3D" / "time_convergence.csv"   # line 21
 
 
 def even_schedule(config: Config) -> TreatmentSchedule:

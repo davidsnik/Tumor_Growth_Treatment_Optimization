@@ -22,7 +22,7 @@ from tumor_treatment_opt.solver import solve_model
 PRESET = "paper"
 OVERRIDES: dict = {"mesh_max_size": 1.0}
 TIME_STEPS = (0.5, 0.25, 0.125, 0.0625, 0.03125)
-OUTPUT = Path("outputs") / "validation" / "uniform_tumor_ode.csv"
+OUTPUT = Path("outputs") / "validation" / "validation_3D" / "uniform_tumor_ode.csv"
 
 
 def initial_densities(config: Config) -> tuple[float, float]:

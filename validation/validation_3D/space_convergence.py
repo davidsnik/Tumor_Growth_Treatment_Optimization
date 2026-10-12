@@ -18,7 +18,7 @@ PRESET = "paper"
 OVERRIDES: dict = {"time_step":0.25}
 MESH_SIZES = ((0.2, 0.4), (0.1, 0.2), (0.05, 0.1), (0.025, 0.05), (0.0125, 0.25))
 QUANTITIES = ("objective", "final_total_relative")
-OUTPUT = Path("outputs") / "validation" / "space_convergence.csv"
+OUTPUT = Path("outputs") / "validation" / "validation_3D" / "space_convergence.csv"
 
 
 def even_schedule(config: Config) -> TreatmentSchedule:
