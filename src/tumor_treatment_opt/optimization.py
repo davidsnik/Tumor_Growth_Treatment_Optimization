@@ -13,11 +13,10 @@ from ngsolve import SetNumThreads
 
 from .config import Config
 from .model import TreatmentSchedule, OutcomeMetrics
-from .solver import build_spherical_mesh, solve_model
+from .simulate import build_mesh, simulate
 
 
 _PENALTY = 1.0e6
-_PENALTY_PROGRESSION = 1.0e5
 _CONSTRAINT_MARGIN = 1.0e-9
 
 ### Classes
@@ -32,6 +31,7 @@ class TreatmentOptimizer:
     def __post_init__(self) -> None:
         if self.method not in ("de", "cobyqa", "hybrid"):
             raise ValueError(f"unknown optimization method: {self.method!r}")
+
 
     def solve(self) -> OptimizationResult:
         if self.method == "de":
@@ -118,7 +118,7 @@ def _objective(increments: np.ndarray, config: Config) -> float:
         return _PENALTY + float(np.sum(increments))
 
     try:
-        result = solve_model(config, schedule, mesh=build_spherical_mesh(config))
+        result = simulate(config, schedule)
     except RuntimeError:
         return _PENALTY + float(np.sum(increments))
 
@@ -127,7 +127,7 @@ def _objective(increments: np.ndarray, config: Config) -> float:
     if outcome.progression_prevented:
         return outcome.objective
 
-    return outcome.objective + _PENALTY_PROGRESSION
+    return config.progression_multiplier + 1.0 - outcome.progression_time / config.final_time
 
 def _top_candidates(
     result: OptimizeResult, count: int, min_distance: float
@@ -172,6 +172,14 @@ def build_problem(config: Config) -> ScheduleProblem:
         objective=partial(_objective, config=config),
     )
 
+def _initial_de_pop(config: Config, size: int, rng: np.random.Generator):
+    a_max = config.max_concentration_increment
+    population = rng.uniform(0.0, a_max, size=(size, len(config.candidate_times)))
+    for ii in range(size):
+        population[ii] = rng.uniform() * _make_feasible(population[ii], config)
+    return population
+
+
 ### Optimizers
 def _de_search(config: Config) -> OptimizeResult:
     """Run differential evolution and return SciPy's raw result.
@@ -183,7 +191,7 @@ def _de_search(config: Config) -> OptimizeResult:
 
     parallel = config.optimization_workers != 1
     # Build the mesh before the pool starts so forked workers inherit the cache.
-    build_spherical_mesh(config)
+    build_mesh(config)
     problem = build_problem(config)
 
     cores = os.cpu_count() or 1
@@ -196,12 +204,17 @@ def _de_search(config: Config) -> OptimizeResult:
     def record(intermediate_result: OptimizeResult) -> None:
         history.append(float(intermediate_result.fun))
 
+    rng = np.random.default_rng(config.optimization_seed)
+    n_doses = len(config.candidate_times)
+    init = _initial_de_pop(config, config.optimization_population_size * n_doses, rng)
+
     start = time.perf_counter()
     try:
         result = differential_evolution(
             problem.objective,
             bounds=problem.bounds,
             constraints=problem.constraints,
+            init=init,
             seed=config.optimization_seed,
             maxiter=config.optimization_max_iterations,
             popsize=config.optimization_population_size,
@@ -224,7 +237,7 @@ def _to_optimization_result(
     """Simulate the best schedule of a finished search and package the run."""
 
     schedule = _make_schedule(_make_feasible(result.x, config), config)
-    outcomes = solve_model(config, schedule, mesh=build_spherical_mesh(config)).outcomes
+    outcomes = simulate(config, schedule).outcomes
 
     return OptimizationResult(
         schedule=schedule,
@@ -252,7 +265,8 @@ def _run_cobyqa(
 ) -> OptimizationResult:
     """Local schedule search with COBYQA from one or more starting schedules."""
 
-    mesh = build_spherical_mesh(config)
+    build_mesh(config)
+
     problem = build_problem(config)
     start_points = _default_starts(config) if starts is None else list(starts)
     a_max = config.max_concentration_increment
@@ -291,7 +305,7 @@ def _run_cobyqa(
 
     # COBYQA may end a bit outside the constraints.
     schedule = _make_schedule(_make_feasible(best.x, config), config)
-    outcomes = solve_model(config, schedule, mesh=mesh).outcomes
+    outcomes = simulate(config, schedule).outcomes
 
     return OptimizationResult(
         schedule=schedule,
@@ -317,12 +331,17 @@ def _run_hybrid(
     """DE on a cheap model to find promising regions, then COBYQA on the full model."""
 
     if cheap_config is None:
-        cheap_config = (
-            replace(config, mesh_max_size=2.0 * config.mesh_max_size,
-                    mesh_fine_size=2.0 * config.mesh_fine_size)
-            if config.lumping
-            else replace(config, mechanics_enabled=False)
-        )
+        if config.model == "3D":
+            cheap_config = (
+                replace(config, mesh_max_size=2.0 * config.mesh_max_size,
+                        mesh_fine_size=2.0 * config.mesh_fine_size)
+                if config.lumping
+                else replace(config, mechanics_enabled=False)
+            )
+        else:
+            cheap_config = (
+                replace(config, mesh_max_size=2.0 * config.mesh_max_size)
+            )
     if cheap_config.candidate_times != config.candidate_times:
         raise ValueError("cheap_config must use the same candidate_times as config")
     if min_distance is None:
@@ -334,6 +353,8 @@ def _run_hybrid(
             "every cheap-model evaluation failed or was invalid; choose a different cheap_config"
         )
     de_result = _to_optimization_result(de_raw, cheap_config, method="de")
+
+    print("DE run finished")
 
     starts = _top_candidates(de_raw, count=n_starts, min_distance=min_distance)
     cobyqa_result = _run_cobyqa(config, starts=starts or None, max_evaluations=max_evaluations)

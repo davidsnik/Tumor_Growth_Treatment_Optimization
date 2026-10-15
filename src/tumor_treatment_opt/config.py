@@ -15,6 +15,8 @@ from typing import Any
 @dataclass(frozen=True)
 class Config:
     """Complete configuration for one simulation or optimization run."""
+    # Model
+    model: str
 
     # Geometry and time discretization
     domain_radius: float  # Radius R of the spherical tissue domain.
@@ -114,6 +116,10 @@ class Config:
         if any(not isfinite(time) for time in self.candidate_times):
             raise ValueError("candidate_times must be finite")
 
+        if self.model not in ["radial", "3D"]:
+            raise ValueError("only radial and 3D models supported")
+        if self.model == "radial" and self.lumping:
+            raise ValueError("the radial model does not support lumping; set lumping=False")
         if self.domain_radius <= 0.0:
             raise ValueError("domain_radius must be positive")
         if self.mesh_max_size <= 0.0:
