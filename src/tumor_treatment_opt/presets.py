@@ -19,6 +19,7 @@ _PAPER: dict[str, Any] = dict(
     mesh_max_size=0.1,
     mesh_refinement_radius=0.6, 
     mesh_fine_size=0.05,
+    time_order="backward",
     final_time=20.0,
     time_step=0.125,
     population_element_order=1,

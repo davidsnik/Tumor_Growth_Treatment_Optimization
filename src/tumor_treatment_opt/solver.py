@@ -244,8 +244,10 @@ def _solve_spd(matrix, rhs, space, tolerance=1.0e-10, max_iterations=500):
 
 
 def _advance_populations(
-    sensitive_old: GridFunction,
-    resistant_old: GridFunction,
+    sensitive_effective: GridFunction,
+    resistant_effective: GridFunction,
+    sensitive_guess: GridFunction,
+    resistant_guess: GridFunction,
     diffusion_sensitive: Any,
     diffusion_resistant: Any,
     concentration: float,
@@ -254,20 +256,20 @@ def _advance_populations(
     nonlinear_tolerance: float,
     nonlinear_max_iterations: int,
 ) -> tuple[GridFunction, GridFunction]:
-    """Take one backward-Euler step using a fixed-point reaction solve or semi implicit Euler, with optional mass matrix lumping."""
+    """Take one backward-Euler or BDF2 step using a fixed-point reaction solve or semi implicit methods, with optional mass matrix lumping."""
 
-    space = sensitive_old.space
+    space = sensitive_effective.space
     trial, test = space.TnT()
-    sensitive_iterate = _copy_field(sensitive_old)
-    resistant_iterate = _copy_field(resistant_old)
+    sensitive_iterate = _copy_field(sensitive_guess)
+    resistant_iterate = _copy_field(resistant_guess)
 
     mass_dx = _LUMPED_DX if config.lumping else dx
 
     sensitive_rhs = LinearForm(space)
-    sensitive_rhs += sensitive_old * test / step_size * mass_dx
+    sensitive_rhs += sensitive_effective * test / step_size * mass_dx
     sensitive_rhs.Assemble()
     resistant_rhs = LinearForm(space)
-    resistant_rhs += resistant_old * test / step_size * mass_dx
+    resistant_rhs += resistant_effective * test / step_size * mass_dx
     resistant_rhs.Assemble()
 
     semi_implicit = config.time_stepping == "semi_implicit"
@@ -397,14 +399,54 @@ def _solve_model(
     mechanics = _prepare_mechanics(mesh, config) if config.mechanics_enabled else None
     displacement = None
     von_mises = None
+    sensitive_previous = None
+    resistant_previous = None
 
     for step, (time, next_time) in enumerate(zip(times[:-1], times[1:]), start=1):
         step_size = float(next_time - time)
+        use_bdf2 = config.time_order == "BDF2" and step > 1
+        dose_here = sum(
+            dose for dose_time, dose in zip(schedule.times, schedule.increments)
+            if np.isclose(time, dose_time)
+        )
+        if use_bdf2 and dose_here > 0.0:
+            # J = dose * d(sensitive reaction)/dc; must match reaction_terms in model.py.
+
+            s_now = sensitive.vec.FV().NumPy()
+            r_now = resistant.vec.FV().NumPy()
+            jump = (
+                -config.growth_rate_sensitive * config.treatment_strength * dose_here
+                * (1.0 - (s_now + r_now) / config.carrying_capacity) * s_now
+            )
+            sensitive_ghost = GridFunction(population_space)
+            sensitive_ghost.vec.FV().NumPy()[:] = sensitive_previous.vec.FV().NumPy() - step_size * jump
+            sensitive_previous = sensitive_ghost
+        
+        if use_bdf2:
+            effective_step = 2.0 * step_size / 3.0
+            sensitive_effective = GridFunction(population_space)
+            sensitive_effective.vec.data = (4.0 / 3.0) * sensitive.vec - (1.0 / 3.0) * sensitive_previous.vec
+            resistant_effective = GridFunction(population_space)
+            resistant_effective.vec.data = (4.0 / 3.0) * resistant.vec - (1.0 / 3.0) * resistant_previous.vec
+            sensitive_guess = GridFunction(population_space)
+            sensitive_guess.vec.data = 2.0 * sensitive.vec - sensitive_previous.vec
+            resistant_guess = GridFunction(population_space)
+            resistant_guess.vec.data = 2.0 * resistant.vec - resistant_previous.vec
+
+            concentration = float(schedule.concentration(time, config)) * np.exp(
+                -config.drug_decay_rate * step_size
+            )
+        else:
+            effective_step = step_size
+            sensitive_effective, resistant_effective = sensitive, resistant
+            sensitive_guess, resistant_guess = sensitive, resistant
+            concentration = float(schedule.concentration(0.5 * (time + next_time), config))
+
         if mechanics is None:
             diffusion_factor = 1.0
         else:
             displacement, von_mises = _solve_mechanics(
-                mechanics, sensitive + resistant, config
+                mechanics, sensitive_guess + resistant_guess, config
             )
             diffusion_factor = (
                 1.0
@@ -412,19 +454,21 @@ def _solve_model(
                 else exp(-config.stress_sensitivity * von_mises)
             )
 
-        # Midpoint evaluation applies a dose to intervals after, not before, it occurs.
-        concentration = float(schedule.concentration(0.5 * (time + next_time), config))
+        sensitive_previous, resistant_previous = sensitive, resistant
         sensitive, resistant = _advance_populations(
-            sensitive,
-            resistant,
+            sensitive_effective,
+            resistant_effective,
+            sensitive_guess,
+            resistant_guess,
             config.diffusion_sensitive * diffusion_factor,
             config.diffusion_resistant * diffusion_factor,
             concentration,
-            step_size,
+            effective_step,
             config,
             nonlinear_tolerance,
             nonlinear_max_iterations,
         )
+
         _check_nonnegative(sensitive, mesh, "sensitive", next_time)
         _check_nonnegative(resistant, mesh, "resistant", next_time)
 

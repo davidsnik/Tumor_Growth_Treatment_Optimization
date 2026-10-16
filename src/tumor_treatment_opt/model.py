@@ -52,9 +52,8 @@ class TreatmentSchedule:
             for increment in self.increments
         ):
             raise ValueError("a treatment increment exceeds a_max")
-        if sum(self.increments) > config.concentration_increment_budget:
+        if sum(self.increments) > config.concentration_increment_budget * (1.0 + 1.0e-12):
             raise ValueError("the treatment schedule exceeds budget B")
-
         concentrations = self.concentration(self.times, config)
         if np.max(concentrations) > 1.0:
             raise ValueError("the treatment schedule produces u(t) > 1")

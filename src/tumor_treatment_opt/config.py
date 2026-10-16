@@ -23,6 +23,7 @@ class Config:
     mesh_max_size: float  # Largest tetrahedron size used by Netgen.
     mesh_refinement_radius: float  # Radius of the refined ball around the tumor centre; 0 disables it.
     mesh_fine_size: float  # Largest tetrahedron size inside the refinement ball.
+    time_order: str # Time integration scheme of the solver
     final_time: float  # End time T of the simulated treatment period.
     time_step: float  # Step size used to advance the coupled model.
     population_element_order: int  # Element order for Ns and Nr.
@@ -128,6 +129,8 @@ class Config:
             raise ValueError("mesh_refinement_radius must lie in [0, domain_radius)")
         if self.mesh_refinement_radius > 0.0 and not 0.0 < self.mesh_fine_size <= self.mesh_max_size:
             raise ValueError("mesh_fine_size must lie in (0, mesh_max_size]")
+        if self.time_order not in ["backward", "BDF2"]:
+            raise ValueError("The supported time integration schemes are `backward` and `BDF2`")
         if self.final_time <= 0.0:
             raise ValueError("final_time must be positive")
         if not 0.0 < self.time_step <= self.final_time:

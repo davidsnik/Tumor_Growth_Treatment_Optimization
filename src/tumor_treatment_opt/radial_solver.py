@@ -105,8 +105,10 @@ def radial_displacement(
     return displacement
 
 def _advance_populations(
-    sensitive_old: GridFunction,
-    resistant_old: GridFunction,
+    sensitive_effective: GridFunction,
+    resistant_effective: GridFunction,
+    sensitive_guess: GridFunction,
+    resistant_guess: GridFunction,
     diffusion_sensitive: Any,
     diffusion_resistant: Any,
     concentration: float,
@@ -115,22 +117,22 @@ def _advance_populations(
     nonlinear_tolerance: float,
     nonlinear_max_iterations: int,
 ) -> tuple[GridFunction, GridFunction]:
-    """Take one backward-Euler step using a fixed-point reaction solve or semi implicit Euler."""
-    space = sensitive_old.space
+    """Take one backward-Euler or BDF-2 step using a fixed-point reaction solve or semi implicit method."""
+    space = sensitive_effective.space
     trial, test = space.TnT()
     radial_weight = x * x
 
     sensitive_rhs = LinearForm(space)
-    sensitive_rhs += sensitive_old * test / step_size * radial_weight * _RADIAL_DX
+    sensitive_rhs += sensitive_effective * test / step_size * radial_weight * _RADIAL_DX
     sensitive_rhs.Assemble()
     resistant_rhs = LinearForm(space)
-    resistant_rhs += resistant_old * test / step_size * radial_weight * _RADIAL_DX
+    resistant_rhs += resistant_effective * test / step_size * radial_weight * _RADIAL_DX
     resistant_rhs.Assemble()
 
     semi_implicit = config.time_stepping == "semi_implicit"
     iterations = 1 if semi_implicit else nonlinear_max_iterations
-    sensitive_iterate = sensitive_old
-    resistant_iterate = resistant_old
+    sensitive_iterate = sensitive_guess
+    resistant_iterate = resistant_guess
 
     for _ in range(iterations):
         crowding = 1.0 - (sensitive_iterate + resistant_iterate) / config.carrying_capacity
@@ -256,30 +258,72 @@ def solve_radial_model(
     von_mises = GridFunction(H1(mesh, order=1), name="von Mises stress")
     stress_feedback = config.mechanics_enabled and config.stress_sensitivity != 0.0
 
+    sensitive_previous = None
+    resistant_previous = None
 
     for step, (time, next_time) in enumerate(zip(times[:-1], times[1:]), start=1):
         step_size = float(next_time - time)
+        use_bdf2 = config.time_order == "BDF2" and step > 1
+        dose_here = sum(
+            dose for dose_time, dose in zip(schedule.times, schedule.increments)
+            if np.isclose(time, dose_time)
+        )
+        if use_bdf2 and dose_here > 0.0:
+            # J = dose * d(sensitive reaction)/dc; must match reaction_terms in model.py.
+
+            s_now = sensitive.vec.FV().NumPy()
+            r_now = resistant.vec.FV().NumPy()
+            jump = (
+                -config.growth_rate_sensitive * config.treatment_strength * dose_here
+                * (1.0 - (s_now + r_now) / config.carrying_capacity) * s_now
+            )
+            sensitive_ghost = GridFunction(population_space)
+            sensitive_ghost.vec.FV().NumPy()[:] = sensitive_previous.vec.FV().NumPy() - step_size * jump
+            sensitive_previous = sensitive_ghost
+
+        if use_bdf2:
+            effective_step = 2.0 * step_size / 3.0
+            sensitive_effective = GridFunction(population_space)
+            sensitive_effective.vec.data = (4.0 / 3.0) * sensitive.vec - (1.0 / 3.0) * sensitive_previous.vec
+            resistant_effective = GridFunction(population_space)
+            resistant_effective.vec.data = (4.0 / 3.0) * resistant.vec - (1.0 / 3.0) * resistant_previous.vec
+            sensitive_guess = GridFunction(population_space)
+            sensitive_guess.vec.data = 2.0 * sensitive.vec - sensitive_previous.vec
+            resistant_guess = GridFunction(population_space)
+            resistant_guess.vec.data = 2.0 * resistant.vec - resistant_previous.vec
+
+            concentration = float(schedule.concentration(time, config)) * np.exp(
+                -config.drug_decay_rate * step_size
+            )
+        else:
+            effective_step = step_size
+            sensitive_effective, resistant_effective = sensitive, resistant
+            sensitive_guess, resistant_guess = sensitive, resistant
+            concentration = float(schedule.concentration(0.5 * (time + next_time), config))
+
         if stress_feedback:
-            total.vec.data = sensitive.vec + resistant.vec
+            total.vec.data = sensitive_guess.vec + resistant_guess.vec
             von_mises.vec.FV().NumPy()[:] = radial_von_mises(total, mesh, radii, config)
             diffusion_factor = exp(-config.stress_sensitivity * von_mises)
         else:
             diffusion_factor = 1.0
 
 
-        # Midpoint evaluation applies a dose to intervals after, not before, it occurs.
-        concentration = float(schedule.concentration(0.5 * (time + next_time), config))
+        sensitive_previous, resistant_previous = sensitive, resistant
         sensitive, resistant = _advance_populations(
-            sensitive,
-            resistant,
+            sensitive_effective,
+            resistant_effective,
+            sensitive_guess,
+            resistant_guess,
             config.diffusion_sensitive * diffusion_factor,
             config.diffusion_resistant * diffusion_factor,
             concentration,
-            step_size,
+            effective_step,
             config,
             nonlinear_tolerance,
             nonlinear_max_iterations,
         )
+        
         _check_nonnegative(sensitive, mesh, config, "sensitive", next_time)
         _check_nonnegative(resistant, mesh, config, "resistant", next_time)
 
