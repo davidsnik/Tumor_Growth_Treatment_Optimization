@@ -1,9 +1,16 @@
-"""Self-convergence of the time-stepping under dt refinement.
+"""Time-scheme orders in the 3D model: backward Euler vs BDF2, both semi-implicit.
+
+A lighter version of the radial comparison: Picard is left out (the radial study shows
+it is not worth its cost) and T is shortened, since the order does not depend on T.
+Two measures per run:
+- self-convergence: the change in a quantity when dt is halved, and the order it implies;
+- error against a Richardson limit from the two finest BDF2 runs (no extra solves).
 """
 
 from __future__ import annotations
 
 import csv
+import time
 from pathlib import Path
 
 import numpy as np
@@ -14,10 +21,25 @@ from tumor_treatment_opt.presets import get_config
 from tumor_treatment_opt.solver import build_spherical_mesh, solve_model
 
 PRESET = "paper"
-OVERRIDES: dict = {}
-TIME_STEPS = (0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625)
-QUANTITIES = ("objective", "final_total_relative")
-OUTPUT = Path("outputs") / "validation" / "validation_3D" / "time_convergence.csv"   # line 21
+FINAL_TIME = 5.0
+DOSE = 0.0375  # per dose, as in the radial runs (paper budget 1.5 over 40 doses)
+N_DOSES = int(FINAL_TIME / 0.5)
+OVERRIDES: dict = {
+    "final_time": FINAL_TIME,
+    "candidate_times": tuple(0.5 * k for k in range(N_DOSES)),
+    "concentration_increment_budget": DOSE * N_DOSES,
+}
+CASES = {
+    "paper": {},
+    "strong_mechanics": {"stress_sensitivity": 300.0, "domain_radius": 2.0},
+}
+SCHEMES = (
+    ("backward", "semi_implicit"),
+    ("BDF2", "semi_implicit"),
+)
+TIME_STEPS = (0.25, 0.125, 0.0625, 0.03125, 0.015625)
+QUANTITIES = ("final_total_relative", "progression_time")
+OUTPUT = Path("outputs") / "validation" / "validation_3D" / "time_scheme_comparison.csv"
 
 
 def even_schedule(config: Config) -> TreatmentSchedule:
@@ -32,33 +54,57 @@ def even_schedule(config: Config) -> TreatmentSchedule:
     return schedule
 
 
+def simulate(case: str, time_order: str, time_stepping: str, time_step: float) -> dict:
+    config = get_config(
+        PRESET, time_order=time_order, time_stepping=time_stepping, time_step=time_step,
+        **OVERRIDES, **CASES[case],
+    )
+    schedule = even_schedule(config)
+    mesh = build_spherical_mesh(config)
+    start = time.perf_counter()
+    outcomes = solve_model(config, schedule, mesh=mesh).outcomes
+    seconds = time.perf_counter() - start
+    return {
+        "case": case,
+        "time_order": time_order,
+        "time_stepping": time_stepping,
+        "dt": time_step,
+        "final_total_relative": outcomes.final_total_relative,
+        "progression_time": outcomes.progression_time,
+        "seconds": seconds,
+    }
+
+
 def main() -> None:
     rows = []
-    schedule = None
-    for time_step in TIME_STEPS:
-        config = get_config(PRESET, time_step=time_step, **OVERRIDES)
-        if schedule is None:
-            schedule = even_schedule(config)
-        mesh = build_spherical_mesh(config)
-        outcomes = solve_model(config, schedule, mesh=mesh).outcomes
-        rows.append({
-            "dt": time_step,
-            "objective": outcomes.objective,
-            "final_total_relative": outcomes.final_total_relative,
-        })
-        print(f"done: time_step={time_step}", flush=True)
+    for case in CASES:
+        runs = {}
+        for time_order, time_stepping in SCHEMES:
+            runs[time_order, time_stepping] = [
+                simulate(case, time_order, time_stepping, time_step) for time_step in TIME_STEPS
+            ]
+            print(f"done: {case} {time_order} {time_stepping}", flush=True)
 
-    dt = np.array([row["dt"] for row in rows])
-    for quantity in QUANTITIES:
-        values = np.array([row[quantity] for row in rows])
-        differences = np.abs(values[:-1] - values[1:])
-        orders = np.log(differences[:-1] / differences[1:]) / np.log(dt[1:-1] / dt[2:])
+        # Second-order Richardson extrapolation of the two finest BDF2 runs.
+        coarse, fine = runs["BDF2", "semi_implicit"][-2:]
+        limit = {q: fine[q] + (fine[q] - coarse[q]) / 3.0 for q in QUANTITIES}
 
-        for idx in range(len(rows)):
-            difference = differences[idx - 1] if idx > 0 else np.nan
-            order = orders[idx - 2] if idx > 1 else np.nan
-            rows[idx][f"{quantity}_difference"] = difference
-            rows[idx][f"{quantity}_order"] = order
+        dt = np.array(TIME_STEPS)
+        for scheme_rows in runs.values():
+            for quantity in QUANTITIES:
+                values = np.array([row[quantity] for row in scheme_rows])
+                differences = np.abs(values[:-1] - values[1:])
+                difference_orders = np.log(differences[:-1] / differences[1:]) / np.log(dt[1:-1] / dt[2:])
+                errors = np.abs(values - limit[quantity])
+                error_orders = np.log(errors[:-1] / errors[1:]) / np.log(dt[:-1] / dt[1:])
+                for index, row in enumerate(scheme_rows):
+                    # The difference between dt and 2*dt is stored on the dt row.
+                    row[f"{quantity}_difference"] = differences[index - 1] if index > 0 else np.nan
+                    row[f"{quantity}_difference_order"] = difference_orders[index - 2] if index > 1 else np.nan
+                    row[f"{quantity}_limit"] = limit[quantity]
+                    row[f"{quantity}_error"] = errors[index]
+                    row[f"{quantity}_error_order"] = error_orders[index - 1] if index > 0 else np.nan
+            rows.extend(scheme_rows)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT.open("w", newline="") as handle:

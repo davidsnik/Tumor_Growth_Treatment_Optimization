@@ -15,9 +15,9 @@ from tumor_treatment_opt.presets import get_config
 from tumor_treatment_opt.radial_solver import build_1D_mesh, solve_radial_model
 
 PRESET = "paper"
-OVERRIDES: dict = {"time_step":0.25, "lumping":False}
+OVERRIDES: dict = {"time_step":0.25, "lumping":False, "time_order": "BDF2"}
 MESH_SIZES = ((0.2, 0.4), (0.1, 0.2), (0.05, 0.1), (0.025, 0.05), (0.0125, 0.025), (0.00625, 0.0125))
-QUANTITIES = ("objective", "final_total_relative")
+QUANTITIES = ("final_total_relative", "progression_time")
 OUTPUT = Path("outputs") / "validation" / "validation_radial" / "space_convergence.csv"
 
 

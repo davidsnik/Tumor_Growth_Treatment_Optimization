@@ -11,17 +11,35 @@ import csv
 from pathlib import Path
 
 import numpy as np
+import time
 from ngsolve import CoefficientFunction
 from scipy.integrate import solve_ivp
+from scipy.optimize import brentq
+
 
 from tumor_treatment_opt.config import Config
 from tumor_treatment_opt.model import TreatmentSchedule
 from tumor_treatment_opt.presets import get_config
-from tumor_treatment_opt.solver import solve_model
+from tumor_treatment_opt.solver import build_spherical_mesh, solve_model
 
 PRESET = "paper"
-OVERRIDES: dict = {"mesh_max_size": 1.0}
-TIME_STEPS = (0.5, 0.25, 0.125, 0.0625, 0.03125)
+OVERRIDES: dict = {
+    "lumping": True,
+    "mesh_max_size": 0.3,
+    "mesh_fine_size": 0.3,
+    "mesh_refinement_radius": 0.0,
+}
+CASES = {
+    "paper": {}
+}
+SCHEMES = (
+    ("backward", "semi_implicit"),
+    ("backward", "picard"),
+    ("BDF2", "semi_implicit"),
+    ("BDF2", "picard"),
+)
+TIME_STEPS = (0.25, 0.125, 0.0625, 0.03125, 0.015625)
+QUANTITIES = ("final_total_relative", "progression_time")
 OUTPUT = Path("outputs") / "validation" / "validation_3D" / "uniform_tumor_ode.csv"
 
 
@@ -82,37 +100,70 @@ def reference_solution(config: Config, schedule: TreatmentSchedule):
 
     return evaluate
 
+def reference_quantities(config: Config, schedule: TreatmentSchedule) -> dict[str, float]:
+    """N(T)/N(0) and the exact progression time from the uniform ODE."""
+
+    evaluate = reference_solution(config, schedule)
+    initial_total = sum(initial_densities(config))
+
+    def total(t: float) -> float:
+        return float(evaluate(np.array([t]))[:, 0].sum())
+
+    threshold = config.progression_multiplier * initial_total
+    grid = np.linspace(0.0, config.final_time, 4001)
+    totals = np.array([total(t) for t in grid])
+    above = np.flatnonzero(totals >= threshold)
+    progression_time = np.inf
+    if len(above):
+        k = above[0]
+        progression_time = brentq(lambda t: total(t) - threshold, grid[k - 1], grid[k], xtol=1.0e-14)
+    return {
+        "final_total_relative": total(config.final_time) / initial_total,
+        "progression_time": progression_time,
+    }
+
+
+def simulate(case: str, time_order: str, time_stepping: str, time_step: float) -> dict:
+    config = get_config(
+        PRESET, time_order=time_order, time_stepping=time_stepping, time_step=time_step,
+        **OVERRIDES, **CASES[case],
+    )
+    schedule = even_schedule(config)
+    mesh = build_spherical_mesh(config)
+    start = time.perf_counter()
+    outcomes = solve_model(config, schedule, mesh=mesh, initial_condition=uniform_initial_condition).outcomes
+    seconds = time.perf_counter() - start
+    return {
+        "case": case,
+        "time_order": time_order,
+        "time_stepping": time_stepping,
+        "dt": time_step,
+        "final_total_relative": outcomes.final_total_relative,
+        "progression_time": outcomes.progression_time,
+        "seconds": seconds,
+    }
 
 def main() -> None:
     base = get_config(PRESET, **OVERRIDES)
     schedule = even_schedule(base)
-    reference = reference_solution(base, schedule)
-    initial_total = sum(initial_densities(base))
+    reference = reference_quantities(base, schedule)
 
     rows = []
-    for time_step in TIME_STEPS:
-        config = get_config(PRESET, time_step=time_step, **OVERRIDES)
-        result = solve_model(config, schedule, initial_condition=uniform_initial_condition)
-        burdens = result.burdens
-        volume = burdens.total[0] / initial_total
-
-        exact_total = reference(burdens.times).sum(axis=0)
-        numerical_total = burdens.total / volume
-        rows.append({
-            "dt": time_step,
-            "final_total_relative": result.outcomes.final_total_relative,
-            "final_total_relative_exact": exact_total[-1] / initial_total,
-            "final_error": abs(numerical_total[-1] - exact_total[-1]) / initial_total,
-            "max_error_over_time": float(np.max(np.abs(numerical_total - exact_total))) / initial_total,
-        })
-        print(f"done: dt={time_step}", flush=True)
-
-    for key in ("final_error", "max_error_over_time"):
-        for index, row in enumerate(rows):
-            if index >= 1:
-                row[f"{key}_order"] = np.log2(rows[index - 1][key] / row[key])
-            else:
-                row[f"{key}_order"] = np.nan
+    for case in CASES:
+        for time_order, time_stepping in SCHEMES:
+            scheme_rows = [
+                    simulate(case, time_order, time_stepping, time_step) for time_step in TIME_STEPS
+                ]
+            dt = np.array(TIME_STEPS)
+            for quantity in QUANTITIES:
+                values = np.array([row[quantity] for row in scheme_rows])
+                errors = np.abs(values - reference[quantity])
+                error_orders = np.log(errors[:-1] / errors[1:]) / np.log(dt[:-1] / dt[1:])
+                for index, row in enumerate(scheme_rows):
+                    row[f"{quantity}_error"] = errors[index]
+                    row[f"{quantity}_error_order"] = error_orders[index - 1] if index > 0 else np.nan
+            rows.extend(scheme_rows)
+            print(f"done: {case} {time_order} {time_stepping}", flush=True)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT.open("w", newline="") as handle:
