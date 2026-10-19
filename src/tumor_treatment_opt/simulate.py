@@ -8,11 +8,13 @@ from .config import Config
 from .model import TreatmentSchedule
 from .radial_solver import build_1D_mesh, solve_radial_model
 from .solver import SimulationResult, build_spherical_mesh, solve_model
+from .radial_solver_jax import build_radial_mesh, solve_radial_model_jax, RadialJaxResult
 
 
 SOLVERS = {
     "3D": (build_spherical_mesh, solve_model),
     "radial": (build_1D_mesh, solve_radial_model),
+    "radial_jax": (build_radial_mesh, solve_radial_model_jax),
 }
 
 
@@ -21,7 +23,7 @@ def build_mesh(config: Config):
     return SOLVERS[config.model][0](config)
 
 
-def simulate(config: Config, schedule: TreatmentSchedule, **options: Any) -> SimulationResult:
+def simulate(config: Config, schedule: TreatmentSchedule, **options: Any) -> SimulationResult | RadialJaxResult:
     """Solve the model chosen by ``config.model``.
 
     ``options`` go straight to the solver (``mesh``, ``initial_condition``,
