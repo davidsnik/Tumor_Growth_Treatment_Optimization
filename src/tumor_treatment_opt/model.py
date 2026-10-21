@@ -52,8 +52,6 @@ class TreatmentSchedule:
             for increment in self.increments
         ):
             raise ValueError("a treatment increment exceeds a_max")
-        if sum(self.increments) > config.concentration_increment_budget * (1.0 + 1.0e-12):
-            raise ValueError("the treatment schedule exceeds budget B")
         concentrations = self.concentration(self.times, config)
         if np.max(concentrations) > 1.0:
             raise ValueError("the treatment schedule produces u(t) > 1")
@@ -141,7 +139,7 @@ class OutcomeMetrics:
     final_total_relative: float
     average_total_relative: float
     average_resistant_relative: float
-    objective: float
+    objective: float                    # Relative progression time
 
     @property
     def progression_prevented(self) -> bool:
@@ -203,11 +201,13 @@ def calculate_outcomes(series: BurdenTimeSeries, config: Config) -> OutcomeMetri
     average_resistant_relative = float(
         np.trapezoid(resistant / initial_resistant, times) / config.final_time
     )
-    objective = (
+    '''objective = (
         config.weight_end * final_total_relative
         + config.weight_average * average_total_relative
         + config.weight_resistant * average_resistant_relative
-    )
+    )'''
+    objective = min(progression_time, config.final_time) / config.final_time
+
 
     return OutcomeMetrics(
         progression_time=progression_time,

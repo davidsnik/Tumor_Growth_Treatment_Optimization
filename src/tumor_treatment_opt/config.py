@@ -49,7 +49,6 @@ class Config:
     drug_decay_rate: float  # Exponential concentration-decay rate beta.
     candidate_times: tuple[float, ...]  # Fixed administration times tau_l.
     max_concentration_increment: float  # Largest allowed increment a_max.
-    concentration_increment_budget: float  # Total increment budget B.
 
     # Mechanical feedback
     mechanics_enabled: bool  # Whether stress changes tumor-cell spreading.
@@ -98,7 +97,6 @@ class Config:
             "treatment_strength": self.treatment_strength,
             "drug_decay_rate": self.drug_decay_rate,
             "max_concentration_increment": self.max_concentration_increment,
-            "concentration_increment_budget": self.concentration_increment_budget,
             "shear_modulus": self.shear_modulus,
             "poisson_ratio": self.poisson_ratio,
             "force_coupling": self.force_coupling,
@@ -177,8 +175,6 @@ class Config:
             raise ValueError("candidate_times must be strictly increasing")
         if not 0.0 < self.max_concentration_increment <= 1.0:
             raise ValueError("max_concentration_increment must lie in (0, 1]")
-        if self.concentration_increment_budget <= 0.0:
-            raise ValueError("concentration_increment_budget must be positive")
 
         if self.shear_modulus <= 0.0:
             raise ValueError("shear_modulus must be positive")

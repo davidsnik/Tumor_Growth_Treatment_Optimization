@@ -3,33 +3,40 @@
 from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Callable
+from functools import lru_cache
 
 import numpy as np
 import time
-from scipy.optimize import differential_evolution, minimize, Bounds, LinearConstraint, OptimizeResult
-from functools import partial
 import os
+import jax
+import jax.numpy as jnp
+
+from scipy.optimize import differential_evolution, minimize, Bounds, OptimizeResult
+from functools import partial
 from ngsolve import SetNumThreads
 
 from .config import Config
-from .model import TreatmentSchedule, OutcomeMetrics
+from .model import TreatmentSchedule, OutcomeMetrics, gaussian_initial_conditions
+from .solver import _time_grid
+from .radial_solver_jax import _compiled_solver
 from .simulate import build_mesh, simulate
+from .reparametrize import doses_from_fractions, fractions_from_doses, doses_from_fractions_numpy
 
 
-_PENALTY = 1.0e6
-_CONSTRAINT_MARGIN = 1.0e-9
+_PENALTY = 1.0
+_SMOOTHING_STAGES = ((0.03, 1.0), (0.01, 0.5), (0.003, 0.25))
 
 ### Classes
 
 @dataclass
 class TreatmentOptimizer:
     config: Config
-    method: str = "hybrid"                          # "de" | "cobyqa" | "hybrid"
+    method: str = "hybrid"                          # "de" | "cobyqa" | "hybrid" | "lbfgs"
     cheap_config: Config | None = None              # used by "hybrid"
     starts: tuple[np.ndarray, ...] | None = None    # used by "cobyqa"
 
     def __post_init__(self) -> None:
-        if self.method not in ("de", "cobyqa", "hybrid"):
+        if self.method not in ("de", "cobyqa", "hybrid", "lbfgs"):
             raise ValueError(f"unknown optimization method: {self.method!r}")
 
 
@@ -38,19 +45,21 @@ class TreatmentOptimizer:
             return _run_de(self.config)
         if self.method == "cobyqa":
             return _run_cobyqa(self.config, self.starts)
+        if self.method == "lbfgs":
+            return _run_lbfgs(self.config, self.starts)
         return _run_hybrid(self.config, self.cheap_config)
 
 @dataclass
 class ScheduleProblem:
     bounds: Bounds
-    constraints: list[LinearConstraint]
     objective: Callable[[np.ndarray], float]
 
-def _make_schedule(increments: np.ndarray, config: Config) -> TreatmentSchedule:
+def _make_schedule(fractions: np.ndarray, config: Config) -> TreatmentSchedule:
+    increments = doses_from_fractions_numpy(np.clip(fractions, 0.0, 1.0), config)
     return TreatmentSchedule(
         times=config.candidate_times,
         increments=tuple(float(value) for value in increments),
-    )  
+    )
 
 @dataclass(frozen=True)
 class OptimizationResult:
@@ -75,59 +84,24 @@ class OptimizationResult:
 
 
 ### Helpers
-def _concentration_matrix(config: Config) -> np.ndarray:
-    times = np.asarray(config.candidate_times, dtype=float)
-    elapsed = times[:, None] - times[None, :]
-    return np.tril(np.exp(-config.drug_decay_rate * np.abs(elapsed)))
-
 def _default_starts(config: Config) -> list[np.ndarray]:
-    """No treatment, even dosing, and front-loaded dosing, made feasible."""
+    """No treatment, half of the allowed dose throughout, and full dosing in the first half."""
 
     n_doses = len(config.candidate_times)
-    a_max = config.max_concentration_increment
-    even = np.full(n_doses, min(a_max, config.concentration_increment_budget / n_doses))
     front = np.zeros(n_doses)
-    front[: (n_doses + 1) // 2] = a_max
-    return [_make_feasible(x, config) for x in (np.zeros(n_doses), even, front)]
-
-def _make_feasible(increments: np.ndarray, config: Config) -> np.ndarray:
-    """Scale a schedule down just enough to satisfy the budget and u <= 1.
-
-    Every constraint is an upper limit on a nonnegative combination of doses,
-    so one common scale factor always restores feasibility. Points that are
-    already feasible are returned unchanged.
-    """
-
-    x = np.clip(np.asarray(increments, dtype=float), 0.0, config.max_concentration_increment)
-    scale = 1.0
-    total = x.sum()
-    if total > 0.0:
-        scale = min(scale, (config.concentration_increment_budget - _CONSTRAINT_MARGIN) / total)
-    peak = float(np.max(_concentration_matrix(config) @ x))
-    if peak > 0.0:
-        scale = min(scale, (1.0 - _CONSTRAINT_MARGIN) / peak)
-    return x * scale
+    front[: (n_doses + 1) // 2] = 1.0
+    return [np.zeros(n_doses), np.full(n_doses, 0.5), front]
 
 
-def _objective(increments: np.ndarray, config: Config) -> float:
-    schedule = _make_schedule(_make_feasible(increments, config), config)
-
-    try:
-        schedule.validate(config)
-    except ValueError:
-        return _PENALTY + float(np.sum(increments))
-
+def _objective(fractions: np.ndarray, config: Config) -> float:
+    schedule = _make_schedule(fractions, config)
     try:
         result = simulate(config, schedule)
     except RuntimeError:
-        return _PENALTY + float(np.sum(increments))
+        return _PENALTY
+    return -result.outcomes.objective
 
-    outcome = result.outcomes
 
-    if outcome.progression_prevented:
-        return outcome.objective
-
-    return config.progression_multiplier + 1.0 - outcome.progression_time / config.final_time
 
 def _top_candidates(
     result: OptimizeResult, count: int, min_distance: float
@@ -156,29 +130,71 @@ def build_problem(config: Config) -> ScheduleProblem:
     n_doses = len(config.candidate_times)
     bounds = Bounds(
         lb=np.zeros(n_doses),
-        ub=np.full(n_doses, config.max_concentration_increment),
-    )
-    budget_constraint = LinearConstraint(
-        np.ones((1, n_doses)),
-        lb=0.0,
-        ub=config.concentration_increment_budget - _CONSTRAINT_MARGIN,
-    )
-    concentration_constraint = LinearConstraint(
-        _concentration_matrix(config), lb=0.0, ub=1.0 - _CONSTRAINT_MARGIN
+        ub=np.ones(n_doses),
     )
     return ScheduleProblem(
         bounds=bounds,
-        constraints=[budget_constraint, concentration_constraint],
         objective=partial(_objective, config=config),
     )
 
-def _initial_de_pop(config: Config, size: int, rng: np.random.Generator):
-    a_max = config.max_concentration_increment
-    population = rng.uniform(0.0, a_max, size=(size, len(config.candidate_times)))
-    for ii in range(size):
-        population[ii] = rng.uniform() * _make_feasible(population[ii], config)
-    return population
+def _progression_time_jax(times, total, threshold):
+    """First time N(t) reaches the threshold, linearly interpolated; T if it never does.
+    """
 
+    above = total >= threshold
+    progressed = jnp.any(above)
+    index = jnp.maximum(jnp.argmax(above), 1)  # crossing step; argmax is 0 if none or at t=0
+    before, after = total[index - 1], total[index]
+    interior = progressed & (total[0] < threshold)
+    rise = jnp.where(interior, after - before, 1.0)
+    crossing = times[index - 1] + (threshold - before) / rise * (times[index] - times[index - 1])
+    return jnp.where(interior, crossing, jnp.where(progressed, times[0], times[-1]))
+
+def _survival_time(times, total, threshold, width, decay_time):
+    """Smooth stand-in for min(t_p, T): the integral of a survival probability S(t).
+    """
+
+    steps = jnp.diff(times)
+    above = jax.nn.sigmoid((total / threshold - 1.0) / width)
+    exposure = jnp.concatenate((jnp.zeros(1), jnp.cumsum(0.5 * (above[1:] + above[:-1]) * steps)))
+    survival = jnp.exp(-exposure / decay_time)
+    return jnp.sum(0.5 * (survival[1:] + survival[:-1]) * steps)
+
+@lru_cache(maxsize=8)
+def _jax_objectives(config: Config):
+    """Objectives of the dose fractions for model='radial_jax'.
+
+    Returns (exact, smooth): ``exact(thetas)`` is -min(t_p, T)/T for a batch of schedules,
+    the same as ``_objective``; ``smooth(theta, eps, tau)`` is (-t_soft/T, gradient).
+    """
+
+    if config.model != "radial_jax":
+        raise ValueError("gradients need model='radial_jax'")
+    mesh, run = _compiled_solver(config)
+    times = jnp.asarray(_time_grid(config))
+    nodes = np.asarray(mesh.nodes)
+    sensitive_initial, resistant_initial = gaussian_initial_conditions(
+        nodes, 0.0, 0.0, config, exponential=np.exp
+    )
+    sensitive_initial = jnp.asarray(sensitive_initial, dtype=float)
+    resistant_initial = jnp.asarray(resistant_initial, dtype=float)
+
+    def total_burden(fractions):
+        doses = doses_from_fractions(fractions, config)
+        sensitive, resistant, *_ = run(doses, sensitive_initial, resistant_initial)
+        return sensitive + resistant
+
+    def exact(fractions):
+        total = total_burden(fractions)
+        threshold = config.progression_multiplier * total[0]
+        return -_progression_time_jax(times, total, threshold) / config.final_time
+
+    def smooth(fractions, width, decay_time):
+        total = total_burden(fractions)
+        threshold = config.progression_multiplier * total[0]
+        return -_survival_time(times, total, threshold, width, decay_time) / config.final_time
+
+    return jax.jit(jax.vmap(exact)), jax.jit(jax.value_and_grad(smooth))
 
 ### Optimizers
 def _de_search(config: Config) -> OptimizeResult:
@@ -206,14 +222,15 @@ def _de_search(config: Config) -> OptimizeResult:
 
     rng = np.random.default_rng(config.optimization_seed)
     n_doses = len(config.candidate_times)
-    init = _initial_de_pop(config, config.optimization_population_size * n_doses, rng)
+    init = rng.uniform(size=(config.optimization_population_size * n_doses, n_doses))
+    levels = np.linspace(0.1, 1.0, min(10, len(init)))
+    init[: len(levels)] = levels[:, None]
 
     start = time.perf_counter()
     try:
         result = differential_evolution(
             problem.objective,
             bounds=problem.bounds,
-            constraints=problem.constraints,
             init=init,
             seed=config.optimization_seed,
             maxiter=config.optimization_max_iterations,
@@ -236,7 +253,7 @@ def _to_optimization_result(
 ) -> OptimizationResult:
     """Simulate the best schedule of a finished search and package the run."""
 
-    schedule = _make_schedule(_make_feasible(result.x, config), config)
+    schedule = _make_schedule(result.x, config)
     outcomes = simulate(config, schedule).outcomes
 
     return OptimizationResult(
@@ -269,7 +286,6 @@ def _run_cobyqa(
 
     problem = build_problem(config)
     start_points = _default_starts(config) if starts is None else list(starts)
-    a_max = config.max_concentration_increment
 
     best = None
     best_history: list[float] = []
@@ -285,16 +301,14 @@ def _run_cobyqa(
 
         result = minimize(
             problem.objective,
-            x0=_make_feasible(x0, config),
+            x0=np.clip(x0, 0.0, 1.0),
             method="COBYQA",
             bounds=problem.bounds,
-            constraints=problem.constraints,
             callback=record,
             options={
                 "maxfev": max_evaluations,
-                # Step sizes relative to the dose range.
-                "initial_tr_radius": 0.25 * a_max,
-                "final_tr_radius": 1.0e-3 * a_max,
+                "initial_tr_radius": 0.25,
+                "final_tr_radius": 1.0e-3,
             },
         )
         evaluations += int(result.nfev)
@@ -304,7 +318,7 @@ def _run_cobyqa(
     wall_time = time.perf_counter() - start
 
     # COBYQA may end a bit outside the constraints.
-    schedule = _make_schedule(_make_feasible(best.x, config), config)
+    schedule = _make_schedule(best.x, config)
     outcomes = simulate(config, schedule).outcomes
 
     return OptimizationResult(
@@ -345,7 +359,7 @@ def _run_hybrid(
     if cheap_config.candidate_times != config.candidate_times:
         raise ValueError("cheap_config must use the same candidate_times as config")
     if min_distance is None:
-        min_distance = 0.25 * config.max_concentration_increment
+        min_distance = 0.1 * np.sqrt(len(config.candidate_times))
 
     de_raw = _de_search(cheap_config)
     if de_raw.fun >= _PENALTY:
@@ -367,4 +381,86 @@ def _run_hybrid(
         stages=(de_result, cobyqa_result),
     )
 
-    
+def _lbfgs_starts(config: Config, n_random: int = 1) -> list[np.ndarray]:
+    n_doses = len(config.candidate_times)
+    rng = np.random.default_rng(config.optimization_seed)
+    constant = [np.full(n_doses, level) for level in (0.25, 0.5, 1.0)]
+    return constant + [rng.uniform(size=n_doses) for _ in range(n_random)]
+
+def _run_lbfgs(
+    config: Config,
+    starts: tuple[np.ndarray, ...] | None = None,
+    max_iterations: int = 500,
+) -> OptimizationResult:
+    """Local schedule search with L-BFGS-B and JAX gradients on a smoothed objective.
+
+    From every start, L-BFGS-B runs once per smoothing stage, each stage starting where the
+    previous one ended. Every final schedule is scored with the exact t_p; the best one is
+    returned, and the per-start results are kept in ``stages``.
+    """
+
+    exact, smooth = _jax_objectives(config)
+    problem = build_problem(config)
+    start_points = _lbfgs_starts(config) if starts is None else list(starts)
+
+    runs: list[OptimizationResult] = []
+    start = time.perf_counter()
+
+    for x0 in start_points:
+        run_start = time.perf_counter()
+        fractions = np.clip(np.asarray(x0, dtype=float), 0.0, 1.0)
+        history: list[float] = []
+        evaluations = 0
+
+        def record(intermediate_result: OptimizeResult) -> None:
+            history.append(float(intermediate_result.fun))
+
+        for width, decay_time in _SMOOTHING_STAGES:
+
+            def fun(x, width=width, decay_time=decay_time):
+                value, gradient = smooth(jnp.asarray(x), width, decay_time)
+                return float(value), np.asarray(gradient, dtype=float)
+
+            result = minimize(
+                fun,
+                x0=fractions,
+                jac=True,
+                method="L-BFGS-B",
+                bounds=problem.bounds,
+                callback=record,
+                options={"maxiter": max_iterations},
+            )
+            fractions = np.clip(result.x, 0.0, 1.0)
+            evaluations += int(result.nfev)
+
+        value = float(exact(jnp.asarray(fractions)[None])[0])
+        schedule = _make_schedule(fractions, config)
+        runs.append(
+            OptimizationResult(
+                schedule=schedule,
+                outcomes=simulate(config, schedule).outcomes,
+                objective_value=value,
+                method="lbfgs",
+                converged=bool(result.success),
+                message=str(result.message),
+                evaluations=evaluations,
+                failed_evaluations=0,
+                wall_time=time.perf_counter() - run_start,
+                history=tuple(history),
+            )
+        )
+
+    best = min(runs, key=lambda run: run.objective_value)
+    return OptimizationResult(
+        schedule=best.schedule,
+        outcomes=best.outcomes,
+        objective_value=best.objective_value,
+        method="lbfgs",
+        converged=best.converged,
+        message=best.message,
+        evaluations=sum(run.evaluations for run in runs),
+        failed_evaluations=0,
+        wall_time=time.perf_counter() - start,
+        history=best.history,
+        stages=tuple(runs),
+    )
